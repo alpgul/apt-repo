@@ -1,0 +1,291 @@
+name: 🔄 Auto Update APT Repo
+
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+    inputs:
+      force_update:
+        description: "Force update (even if version hasn't changed)"
+        required: false
+        default: 'false'
+        type: boolean
+
+jobs:
+  check-and-update:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      # ─────────────────────────────────────────
+      # 1. CHECKOUT
+      # ─────────────────────────────────────────
+      - name: 📥 Checkout Repository
+        uses: actions/checkout@v4
+
+      # ─────────────────────────────────────────
+      # 2. INSTALL TOOLS
+      # ─────────────────────────────────────────
+      - name: 🛠️ Install Tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq apt-utils gnupg2 curl
+
+      # ─────────────────────────────────────────
+      # 3. IMPORT GPG KEY
+      # ─────────────────────────────────────────
+      - name: 🔐 Import GPG Key
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+        run: |
+          echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+
+      # ─────────────────────────────────────────
+      # 4. VERSION CHECK
+      # ─────────────────────────────────────────
+      - name: 🔍 Check Latest Docker Desktop Version
+        id: version_check
+        run: |
+          APPCAST=$(curl -sfL "https://desktop.docker.com/linux/main/amd64/appcast.xml")
+
+          LATEST_VERSION=$(echo "$APPCAST" | \
+            grep -oP '(?<=sparkle:shortVersionString=")[^"]+' | head -1 || echo "")
+
+          DEB_URL=$(echo "$APPCAST" | \
+            grep -oP 'url="[^"]+\.deb"' | head -1 | grep -oP '(?<=url=")[^"]+')
+
+          if [ -z "$LATEST_VERSION" ] || [ -z "$DEB_URL" ]; then
+            echo "❌ Version or URL could not be detected!"
+            echo "$APPCAST"
+            exit 1
+          fi
+
+          echo "latest_version=$LATEST_VERSION" >> $GITHUB_OUTPUT
+          echo "deb_url=$DEB_URL"               >> $GITHUB_OUTPUT
+          echo "📦 Latest version: $LATEST_VERSION"
+          echo "🔗 .deb URL: $DEB_URL"
+
+          CURRENT_VERSION=""
+          if [ -f "VERSION" ]; then
+            CURRENT_VERSION=$(head -1 VERSION)
+          fi
+          echo "current_version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+          echo "📌 Current version: $CURRENT_VERSION"
+
+          if [ "$LATEST_VERSION" != "$CURRENT_VERSION" ] || \
+             [ "${{ github.event.inputs.force_update }}" = "true" ]; then
+            echo "needs_update=true" >> $GITHUB_OUTPUT
+            echo "✅ Update required!"
+          else
+            echo "needs_update=false" >> $GITHUB_OUTPUT
+            echo "⏭️ No update needed."
+          fi
+
+      # ─────────────────────────────────────────
+      # 5. PREPARE WORKING DIRECTORY
+      #    Flat structure for Release:
+      #    /tmp/release/
+      # ─────────────────────────────────────────
+      - name: 📁 Prepare Working Directory
+        if: steps.version_check.outputs.needs_update == 'true'
+        run: mkdir -p /tmp/release
+
+      # ─────────────────────────────────────────
+      # 6. DOWNLOAD .DEB
+      # ─────────────────────────────────────────
+      - name: 📦 Download .deb
+        if: steps.version_check.outputs.needs_update == 'true'
+        id: deb_meta
+        env:
+          DEB_URL: ${{ steps.version_check.outputs.deb_url }}
+        run: |
+          DEB_FILE="/tmp/release/docker-desktop-amd64.deb"
+
+          echo "⬇️ Downloading: $DEB_URL"
+          curl -fL "$DEB_URL" -o "$DEB_FILE"
+
+          PKG_NAME=$(dpkg-deb -f "$DEB_FILE" Package)
+          PKG_VERSION=$(dpkg-deb -f "$DEB_FILE" Version)
+          PKG_ARCH=$(dpkg-deb -f "$DEB_FILE" Architecture)
+          PKG_MAINTAINER=$(dpkg-deb -f "$DEB_FILE" Maintainer)
+          PKG_DEPENDS=$(dpkg-deb -f "$DEB_FILE" Depends)
+          PKG_INSTALLED_SIZE=$(dpkg-deb -f "$DEB_FILE" Installed-Size)
+          PKG_DESCRIPTION=$(dpkg-deb -f "$DEB_FILE" Description)
+          FILE_SIZE=$(stat -c%s "$DEB_FILE")
+          MD5=$(md5sum "$DEB_FILE" | awk '{print $1}')
+          SHA1=$(sha1sum "$DEB_FILE" | awk '{print $1}')
+          SHA256=$(sha256sum "$DEB_FILE" | awk '{print $1}')
+          SHA512=$(sha512sum "$DEB_FILE" | awk '{print $1}')
+
+          echo "pkg_name=$PKG_NAME"                >> $GITHUB_OUTPUT
+          echo "pkg_version=$PKG_VERSION"           >> $GITHUB_OUTPUT
+          echo "pkg_arch=$PKG_ARCH"                 >> $GITHUB_OUTPUT
+          echo "pkg_maintainer=$PKG_MAINTAINER"     >> $GITHUB_OUTPUT
+          echo "pkg_depends=$PKG_DEPENDS"           >> $GITHUB_OUTPUT
+          echo "installed_size=$PKG_INSTALLED_SIZE" >> $GITHUB_OUTPUT
+          echo "pkg_description=$PKG_DESCRIPTION"   >> $GITHUB_OUTPUT
+          echo "file_size=$FILE_SIZE"               >> $GITHUB_OUTPUT
+          echo "md5=$MD5"                           >> $GITHUB_OUTPUT
+          echo "sha1=$SHA1"                         >> $GITHUB_OUTPUT
+          echo "sha256=$SHA256"                     >> $GITHUB_OUTPUT
+          echo "sha512=$SHA512"                     >> $GITHUB_OUTPUT
+
+          echo "✅ .deb ready ($FILE_SIZE bytes)"
+
+      # ─────────────────────────────────────────
+      # 7. CREATE PACKAGES FILE
+      # ─────────────────────────────────────────
+      - name: 📝 Create Packages File
+        if: steps.version_check.outputs.needs_update == 'true'
+        run: |
+          cat > /tmp/release/Packages <<EOF
+          Package: ${{ steps.deb_meta.outputs.pkg_name }}
+          Version: ${{ steps.deb_meta.outputs.pkg_version }}
+          Architecture: ${{ steps.deb_meta.outputs.pkg_arch }}
+          Maintainer: ${{ steps.deb_meta.outputs.pkg_maintainer }}
+          Installed-Size: ${{ steps.deb_meta.outputs.installed_size }}
+          Depends: ${{ steps.deb_meta.outputs.pkg_depends }}
+          Filename: docker-desktop-amd64.deb
+          Size: ${{ steps.deb_meta.outputs.file_size }}
+          MD5sum: ${{ steps.deb_meta.outputs.md5 }}
+          SHA1: ${{ steps.deb_meta.outputs.sha1 }}
+          SHA256: ${{ steps.deb_meta.outputs.sha256 }}
+          SHA512: ${{ steps.deb_meta.outputs.sha512 }}
+          Description: ${{ steps.deb_meta.outputs.pkg_description }}
+          EOF
+
+          gzip -9 -kf /tmp/release/Packages
+          xz -9 -kf /tmp/release/Packages
+
+          echo "✅ Packages created"
+          cat /tmp/release/Packages
+
+      # ─────────────────────────────────────────
+      # 8. CREATE AND SIGN RELEASE
+      # ─────────────────────────────────────────
+      - name: 🔏 Create and Sign Release
+        if: steps.version_check.outputs.needs_update == 'true'
+        env:
+          GPG_KEY_ID: ${{ secrets.GPG_KEY_ID }}
+          VERSION: ${{ steps.version_check.outputs.latest_version }}
+        run: |
+          cd /tmp/release
+
+          apt-ftparchive \
+            -o APT::FTPArchive::Release::Origin="MyRepo" \
+            -o APT::FTPArchive::Release::Label="MyRepo" \
+            -o APT::FTPArchive::Release::Suite="stable" \
+            -o APT::FTPArchive::Release::Codename="stable" \
+            -o APT::FTPArchive::Release::Architectures="amd64" \
+            -o APT::FTPArchive::Release::Components="main" \
+            -o APT::FTPArchive::Release::Description="Docker Desktop $VERSION APT Repo" \
+            release . > Release
+
+          gpg --batch \
+            --pinentry-mode loopback \
+            --default-key "$GPG_KEY_ID" \
+            -abs -o Release.gpg Release
+
+          gpg --batch \
+            --pinentry-mode loopback \
+            --default-key "$GPG_KEY_ID" \
+            --clearsign -o InRelease Release
+
+          echo "✅ Release signed"
+          ls -lh /tmp/release/
+
+      # ─────────────────────────────────────────
+      # 9. ADD PUBLIC KEY
+      # ─────────────────────────────────────────
+      - name: 🔑 Add Public Key
+        if: steps.version_check.outputs.needs_update == 'true'
+        env:
+          GPG_KEY_ID: ${{ secrets.GPG_KEY_ID }}
+        run: |
+          gpg --export -a "$GPG_KEY_ID" > /tmp/release/public.key
+          echo "✅ Public key added"
+
+      # ─────────────────────────────────────────
+      # 10. CREATE GITHUB RELEASE
+      # ─────────────────────────────────────────
+      - name: 🚀 Create GitHub Release
+        if: steps.version_check.outputs.needs_update == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version_check.outputs.latest_version }}
+        run: |
+          # Delete old release
+          gh release delete "apt-repo" --yes 2>/dev/null || true
+          git push origin :refs/tags/apt-repo 2>/dev/null || true
+
+          # Create new release
+          gh release create "apt-repo" \
+            --title "APT Repo — Docker Desktop $VERSION" \
+            --notes "Docker Desktop $VERSION APT repository files." \
+            --latest=false
+
+          # Upload all files
+          gh release upload "apt-repo" \
+            /tmp/release/docker-desktop-amd64.deb \
+            /tmp/release/Packages \
+            /tmp/release/Packages.gz \
+            /tmp/release/Packages.xz \
+            /tmp/release/Release \
+            /tmp/release/Release.gpg \
+            /tmp/release/InRelease \
+            /tmp/release/public.key \
+            --clobber
+
+          BASE_URL="https://github.com/${{ github.repository }}/releases/download/apt-repo"
+          echo "✅ Release ready!"
+          echo ""
+          echo "📡 APT source:"
+          echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/myrepo.asc] $BASE_URL ./"
+
+      # ─────────────────────────────────────────
+      # 11. UPDATE VERSION AND CHANGELOG
+      # ─────────────────────────────────────────
+      - name: 📌 Update VERSION and CHANGELOG
+        if: steps.version_check.outputs.needs_update == 'true'
+        run: |
+          VERSION="${{ steps.version_check.outputs.latest_version }}"
+          DATE=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
+
+          echo "$VERSION" > VERSION
+
+          {
+            echo "## $VERSION — $DATE"
+            echo "- Updated Docker Desktop to $VERSION"
+            echo ""
+            cat CHANGELOG.md 2>/dev/null || true
+          } > /tmp/CHANGELOG.md
+          mv /tmp/CHANGELOG.md CHANGELOG.md
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add VERSION CHANGELOG.md
+          git commit -m "🔄 Update Docker Desktop to $VERSION"
+          git push origin main
+
+          echo "✅ VERSION and CHANGELOG updated"
+
+      # ─────────────────────────────────────────
+      # 12. SUMMARY
+      # ─────────────────────────────────────────
+      - name: 📊 Summary
+        if: always()
+        run: |
+          BASE_URL="https://github.com/${{ github.repository }}/releases/download/apt-repo"
+          echo "## 📊 APT Repo Update Report" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| 📌 Old Version | ${{ steps.version_check.outputs.current_version }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 📦 New Version | ${{ steps.version_check.outputs.latest_version }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| ✅ Updated | ${{ steps.version_check.outputs.needs_update }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 📡 Base URL | \`$BASE_URL\` |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### APT Source" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/myrepo.asc] $BASE_URL ./" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
