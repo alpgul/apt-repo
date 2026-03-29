@@ -1,3 +1,6 @@
+## 4.66.1 — 2026-03-29 03:16:53 UTC
+- Updated Docker Desktop to 4.66.1
+
 ## 4.65.0 — 2026-03-22 02:48:17 UTC
 - Updated Docker Desktop to 4.65.0
 
