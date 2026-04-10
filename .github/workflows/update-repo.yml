@@ -75,41 +75,15 @@ jobs:
         run: |
           DEB_FILE="/tmp/release/docker-desktop-amd64.deb"
           curl -fL "$DEB_URL" -o "$DEB_FILE"
-
-          echo "pkg_name=$(dpkg-deb -f "$DEB_FILE" Package)" >> $GITHUB_OUTPUT
-          echo "pkg_version=$(dpkg-deb -f "$DEB_FILE" Version)" >> $GITHUB_OUTPUT
-          echo "pkg_arch=$(dpkg-deb -f "$DEB_FILE" Architecture)" >> $GITHUB_OUTPUT
-          echo "pkg_maintainer=$(dpkg-deb -f "$DEB_FILE" Maintainer)" >> $GITHUB_OUTPUT
-          echo "pkg_depends=$(dpkg-deb -f "$DEB_FILE" Depends)" >> $GITHUB_OUTPUT
-          echo "installed_size=$(dpkg-deb -f "$DEB_FILE" Installed-Size)" >> $GITHUB_OUTPUT
-          echo "pkg_description=$(dpkg-deb -f "$DEB_FILE" Description)" >> $GITHUB_OUTPUT
-          echo "file_size=$(stat -c%s "$DEB_FILE")" >> $GITHUB_OUTPUT
-          echo "md5=$(md5sum "$DEB_FILE" | awk '{print $1}')" >> $GITHUB_OUTPUT
-          echo "sha1=$(sha1sum "$DEB_FILE" | awk '{print $1}')" >> $GITHUB_OUTPUT
-          echo "sha256=$(sha256sum "$DEB_FILE" | awk '{print $1}')" >> $GITHUB_OUTPUT
-          echo "sha512=$(sha512sum "$DEB_FILE" | awk '{print $1}')" >> $GITHUB_OUTPUT
-
+      
       # 7. CREATE PACKAGES FILE
       - name: 📝 Create Packages File
         if: steps.version_check.outputs.needs_update == 'true'
         run: |
-          cat > /tmp/release/Packages <<EOF
-          Package: ${{ steps.deb_meta.outputs.pkg_name }}
-          Version: ${{ steps.deb_meta.outputs.pkg_version }}
-          Architecture: ${{ steps.deb_meta.outputs.pkg_arch }}
-          Maintainer: ${{ steps.deb_meta.outputs.pkg_maintainer }}
-          Installed-Size: ${{ steps.deb_meta.outputs.installed_size }}
-          Depends: ${{ steps.deb_meta.outputs.pkg_depends }}
-          Filename: docker-desktop-amd64.deb
-          Size: ${{ steps.deb_meta.outputs.file_size }}
-          MD5sum: ${{ steps.deb_meta.outputs.md5 }}
-          SHA1: ${{ steps.deb_meta.outputs.sha1 }}
-          SHA256: ${{ steps.deb_meta.outputs.sha256 }}
-          SHA512: ${{ steps.deb_meta.outputs.sha512 }}
-          Description: ${{ steps.deb_meta.outputs.pkg_description }}
-          EOF
-          gzip -9 -kf /tmp/release/Packages
-          xz -9 -kf /tmp/release/Packages
+          cd /tmp/release
+          apt-ftparchive packages . > Packages
+          gzip -9 -kf Packages
+          xz -9 -kf Packages
 
       # 8. CREATE AND SIGN RELEASE
       - name: 🔏 Create and Sign Release
@@ -138,8 +112,28 @@ jobs:
         env:
           GPG_KEY_ID: ${{ secrets.GPG_KEY_ID }}
         run: gpg --export -a "$GPG_KEY_ID" > /tmp/release/public.key
+        
+      # 10. UPDATE VERSION AND CHANGELOG
+      - name: 📌 Update VERSION and CHANGELOG
+        if: steps.version_check.outputs.needs_update == 'true'
+        run: |
+          VERSION="${{ steps.version_check.outputs.latest_version }}"
+          echo "$VERSION" > VERSION
+          {
+            echo "## $VERSION — $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+            echo "- Updated Docker Desktop to $VERSION"
+            echo ""
+            cat CHANGELOG.md 2>/dev/null || true
+          } > /tmp/CHANGELOG.md
+          mv /tmp/CHANGELOG.md CHANGELOG.md
 
-      # 10. CREATE GITHUB RELEASE (FIXED TO PREVENT DRAFT)
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add VERSION CHANGELOG.md
+          git commit -m "🔄 Update Docker Desktop to $VERSION"
+          git push origin main
+
+      # 11. CREATE GITHUB RELEASE (FIXED TO PREVENT DRAFT)
       - name: 🚀 Create GitHub Release
         if: steps.version_check.outputs.needs_update == 'true'
         env:
@@ -173,25 +167,7 @@ jobs:
             /tmp/release/public.key \
             --clobber
 
-      # 11. UPDATE VERSION AND CHANGELOG
-      - name: 📌 Update VERSION and CHANGELOG
-        if: steps.version_check.outputs.needs_update == 'true'
-        run: |
-          VERSION="${{ steps.version_check.outputs.latest_version }}"
-          echo "$VERSION" > VERSION
-          {
-            echo "## $VERSION — $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
-            echo "- Updated Docker Desktop to $VERSION"
-            echo ""
-            cat CHANGELOG.md 2>/dev/null || true
-          } > /tmp/CHANGELOG.md
-          mv /tmp/CHANGELOG.md CHANGELOG.md
 
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add VERSION CHANGELOG.md
-          git commit -m "🔄 Update Docker Desktop to $VERSION"
-          git push origin main
 
       # 12. SUMMARY
       - name: 📊 Summary
