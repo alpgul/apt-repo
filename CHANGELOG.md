@@ -1,3 +1,6 @@
+## 4.78.0 — 2026-06-21 04:55:47 UTC
+- Updated Docker Desktop to 4.78.0
+
 ## 4.77.0 — 2026-06-14 04:46:54 UTC
 - Updated Docker Desktop to 4.77.0
 
