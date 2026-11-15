@@ -1,3 +1,6 @@
+## 4.99.0 — 2026-11-15 05:49:53 UTC
+- Updated Docker Desktop to 4.99.0
+
 ## 4.98.0 — 2026-11-08 05:29:52 UTC
 - Updated Docker Desktop to 4.98.0
 
